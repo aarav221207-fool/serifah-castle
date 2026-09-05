@@ -1,0 +1,6 @@
+{
+  "name": "AGENT_OS",
+  "description": "Autonomous Software Development Workstation and Agent Orchestrator",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
