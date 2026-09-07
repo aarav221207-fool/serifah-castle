@@ -1,5 +1,6 @@
 export type OrchestratorState = 
   | 'IDLE'
+  | 'PREFLIGHT'
   | 'DISCOVERY'
   | 'ARCHITECTURE'
   | 'IMPLEMENTATION'
@@ -56,12 +57,13 @@ export class OrchestratorStateMachine {
 
   canTransitionTo(target: OrchestratorState): boolean {
     const validTransitions: Record<OrchestratorState, OrchestratorState[]> = {
-      IDLE: ['DISCOVERY', 'ARCHITECTURE', 'IMPLEMENTATION'],
+      IDLE: ['PREFLIGHT', 'DISCOVERY', 'ARCHITECTURE', 'IMPLEMENTATION'],
+      PREFLIGHT: ['DISCOVERY', 'ARCHITECTURE', 'IMPLEMENTATION', 'FAILURE'],
       DISCOVERY: ['ARCHITECTURE', 'IMPLEMENTATION', 'FAILURE'],
       ARCHITECTURE: ['IMPLEMENTATION', 'FAILURE'],
       IMPLEMENTATION: ['TESTING', 'FAILURE', 'REPAIR'],
       TESTING: ['VERIFICATION', 'FAILURE', 'REPAIR'],
-      FAILURE: ['REPAIR', 'IDLE'],
+      FAILURE: ['REPAIR', 'IDLE', 'PREFLIGHT'],
       REPAIR: ['TESTING', 'IMPLEMENTATION', 'FAILURE'],
       VERIFICATION: ['SECURITY', 'REPAIR', 'FAILURE'],
       SECURITY: ['RELEASE', 'REPAIR', 'FAILURE'],

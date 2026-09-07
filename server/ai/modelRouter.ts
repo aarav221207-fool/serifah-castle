@@ -144,6 +144,15 @@ export class ModelRouter {
     m.averageLatencyMs = avgLatency;
   }
 
+  removeOrDisableModel(id: string, reason: string) {
+    const m = this.models.get(id);
+    if (!m) return;
+    m.enabled = false;
+    m.health = 'offline';
+    m.observedSuccessRate = 0;
+    console.warn(`[ModelRouter] Disabled model ${id}: ${reason}`);
+  }
+
   routeTask(taskType: 'CODING' | 'RESEARCH' | 'UI' | 'REASONING' | 'COUNSEL' | 'VERIFY' | 'GENERAL', preferredRole?: ModelRole): RouteDecision | null {
     const available = Array.from(this.models.values()).filter(m => {
       if (!m.enabled) return false;

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTaskStore } from '../../store/useTaskStore';
 import { useRepairStore } from '../../store/useRepairStore';
 import { 
@@ -15,8 +15,25 @@ import { cn } from '../../lib/utils';
 export function ActivityPage() {
   const { tasks } = useTaskStore();
   const { repairHistory } = useRepairStore();
+  const [realEvents, setRealEvents] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetch('/api/activity/events')
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data.events)) setRealEvents(data.events);
+      })
+      .catch(() => {});
+  }, []);
 
   const activities = [
+    ...realEvents.map(e => ({
+      type: e.level === 'success' ? 'success' : e.level === 'error' ? 'repair' : 'info',
+      title: e.type.replace(/_/g, ' '),
+      message: e.message,
+      time: new Date(e.timestamp).toLocaleTimeString(),
+      id: e.id
+    })),
     ...tasks.map(t => ({
       type: t.status === 'VERIFIED' ? 'success' : t.status === 'IN_PROGRESS' ? 'running' : 'pending',
       title: `Task: ${t.title}`,

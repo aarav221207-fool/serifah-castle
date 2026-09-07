@@ -469,27 +469,14 @@ function InteractiveBrowserPreview() {
 
       {/* Subtab View */}
       {subTab === 'preview' ? (
-        <div className="flex-1 p-4 bg-zinc-200 dark:bg-zinc-950 flex flex-col items-center justify-center">
-          <div className="w-full h-full bg-white dark:bg-zinc-900 rounded-lg shadow-sm border border-zinc-300 dark:border-zinc-800 p-6 flex flex-col items-center justify-center text-center">
-            <div className="w-12 h-12 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center mb-3">
-              <Monitor className="w-6 h-6" />
-            </div>
-            <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-100">AGENT_OS Live Preview</h3>
-            <p className="text-xs text-zinc-500 max-w-md mt-1 mb-4">
-              The local development server is serving the compiled application on port 3000. All routing, state management, and failure boundaries are verified active.
-            </p>
-            <div className="flex items-center gap-2">
-              <span className="px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
-                ● DevServer: 3000 Active
-              </span>
-              <button
-                onClick={() => addConsoleEntry('log', 'User triggered live DOM inspection test.', 'preview')}
-                className="px-3 py-1 rounded text-xs bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 font-medium"
-              >
-                Simulate Log Event
-              </button>
-            </div>
-          </div>
+        <div className="flex-1 bg-zinc-100 dark:bg-zinc-950 flex flex-col relative overflow-hidden">
+          <iframe
+            key={browserUrl}
+            src="/workspace-preview/"
+            title="Workspace Runtime Preview"
+            className="w-full h-full border-0 bg-white dark:bg-zinc-900"
+            sandbox="allow-scripts allow-same-origin allow-forms"
+          />
         </div>
       ) : (
         <div className="flex-1 bg-zinc-950 p-4 font-mono text-xs overflow-auto flex flex-col">

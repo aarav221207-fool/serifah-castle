@@ -363,19 +363,24 @@ export const useSandboxStore = create<SandboxStore>((set, get) => ({
     try {
       const res = await fetch('/api/workspace/verify', { method: 'POST' });
       const data = await res.json();
-      const testList = (data.tests || []).map((t: any) => ({
-        ...t,
-        status: t.status as 'PASS' | 'FAIL'
+      const rawChecks = data.checks || data.report?.checks || data.tests || [];
+      const testList = rawChecks.map((t: any, idx: number) => ({
+        id: t.id || `check-${idx}`,
+        name: t.name,
+        suite: t.category || t.suite || 'Independent Gate',
+        status: (t.passed !== undefined ? (t.passed ? 'PASS' : 'FAIL') : t.status) as 'PASS' | 'FAIL',
+        durationMs: t.durationMs || 0,
+        errorMessage: t.error
       }));
       set({
         tests: testList,
         verification: {
           isVerified: Boolean(data.success),
-          lintPassed: Boolean(data.lintPassed),
-          testsPassed: Boolean(data.testsPassed),
-          buildPassed: Boolean(data.buildPassed),
+          lintPassed: Boolean(data.report?.checks?.find((c: any) => c.category === 'TYPESCRIPT')?.passed ?? data.lintPassed),
+          testsPassed: Boolean(data.success),
+          buildPassed: Boolean(data.report?.checks?.find((c: any) => c.category === 'BUILD')?.passed ?? data.buildPassed),
           lastChecked: Date.now(),
-          error: data.lintError || data.buildError
+          error: data.summary || data.lintError || data.buildError
         }
       });
       return testList;

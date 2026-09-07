@@ -9,6 +9,10 @@ import { ModelRouter } from './server/ai/modelRouter';
 import { AIRuntime } from './server/ai/runtime';
 import { ProjectBrain } from './server/brain/projectBrain';
 import { MasterOrchestrator } from './server/orchestrator/orchestrator';
+import { ProviderPreflight } from './server/ai/preflight';
+import { skillManager } from './server/skills/skillManager';
+import { activityLogger } from './server/orchestrator/activityLog';
+import { IndependentVerifier } from './server/verification/verifier';
 
 const execAsync = util.promisify(exec);
 
@@ -193,52 +197,94 @@ async function startServer() {
     }
   });
 
-  // Verification API (Tests, Lint, Build)
+  // Verification API (Authentic Checks in WORKSPACE_DIR)
   app.post('/api/workspace/verify', async (req, res) => {
     try {
       await ensureWorkspace();
+      const verifier = new IndependentVerifier(WORKSPACE_DIR);
+      const report = await verifier.verifyAll();
       
-      // 1. Check linter / syntax
-      let lintPassed = true;
-      let lintError = '';
-      try {
-        await execAsync('npx tsc --noEmit', { cwd: process.cwd(), timeout: 10000 });
-      } catch (err: any) {
-        lintPassed = false;
-        lintError = err.stdout || err.stderr || err.message;
-      }
-
-      // 2. Automated tests
-      const tests = [
-        { id: 't-1', name: 'FileSystem Integrity Check', suite: 'Sanity', status: 'PASS', durationMs: 12 },
-        { id: 't-2', name: 'Model Router Role Mapping', suite: 'Orchestrator', status: 'PASS', durationMs: 25 },
-        { id: 't-3', name: 'Git Workspace Working Tree', suite: 'VCS', status: 'PASS', durationMs: 18 }
-      ];
-
-      // 3. Build verification
-      let buildPassed = true;
-      let buildError = '';
-      try {
-        // Quick verification build
-        await execAsync('npm run build', { cwd: process.cwd(), timeout: 30000 });
-      } catch (err: any) {
-        buildPassed = false;
-        buildError = err.stdout || err.stderr || err.message;
-      }
-
-      const allPassed = lintPassed && buildPassed;
       res.json({
-        success: allPassed,
-        lintPassed,
-        lintError,
-        testsPassed: true,
-        tests,
-        buildPassed,
-        buildError
+        success: report.passed,
+        report,
+        checks: report.checks,
+        summary: report.summary
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Real Workspace Runtime & Build API
+  app.get('/api/workspace/runtime', (req, res) => {
+    res.json({ success: true, ...orchestrator.getWorkspaceService().getRuntimeStatus() });
+  });
+
+  app.post('/api/workspace/runtime/:action', async (req, res) => {
+    const { action } = req.params;
+    const ws = orchestrator.getWorkspaceService();
+    if (action === 'start') {
+      const status = await ws.startRuntime();
+      return res.json({ success: true, status });
+    } else if (action === 'stop') {
+      const status = ws.stopRuntime();
+      return res.json({ success: true, status });
+    } else if (action === 'restart') {
+      const status = await ws.restartRuntime();
+      return res.json({ success: true, status });
+    } else if (action === 'build') {
+      const buildResult = await ws.buildProject();
+      return res.json({ success: buildResult.exitCode === 0, ...buildResult });
+    }
+    res.status(400).json({ error: 'Invalid action' });
+  });
+
+  // Real Workspace Static Preview Route
+  const workspaceDist = path.join(WORKSPACE_DIR, 'dist');
+  app.use('/workspace-preview', express.static(workspaceDist));
+  app.get('/workspace-preview/*', (req, res) => {
+    const idx = path.join(workspaceDist, 'index.html');
+    res.sendFile(idx);
+  });
+
+  // Preflight API
+  app.post('/api/ai/preflight', async (req, res) => {
+    try {
+      const preflight = new ProviderPreflight(providerManager, modelRouter);
+      const result = await preflight.runPreflight(req.body?.providerId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ passed: false, error: { message: err.message, details: { code: 'PREFLIGHT_ERROR', retryable: false } } });
+    }
+  });
+
+  // Global Skills API
+  app.get('/api/skills', (req, res) => {
+    res.json({ success: true, skills: skillManager.getAllSkills() });
+  });
+
+  app.post('/api/skills', async (req, res) => {
+    try {
+      const skill = await skillManager.createOrUpdateSkill(req.body);
+      res.json({ success: true, skill });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/skills/:id', async (req, res) => {
+    try {
+      const success = await skillManager.deleteSkill(req.params.id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Activity Execution Events API
+  app.get('/api/activity/events', (req, res) => {
+    const runId = req.query.runId as string | undefined;
+    res.json({ success: true, events: activityLogger.getEvents(runId) });
   });
 
   // Terminal Execution API (Sandboxed within WORKSPACE_DIR)

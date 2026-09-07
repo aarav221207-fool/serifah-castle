@@ -9,12 +9,15 @@ import {
   GenerateResponse, 
   ProviderQuota 
 } from '../types';
+import { validateCredential } from '../credentialUtils';
+import { classifyProviderError, ProviderError } from '../errors';
 
 export class GeminiAdapter implements ProviderAdapter {
   providerId: string;
   type: ProviderType = 'gemini';
   private apiKey: string = '';
   private ai: GoogleGenAI | null = null;
+  private connectionError: ProviderError | null = null;
 
   constructor(providerId: string, config?: ProviderConfig) {
     this.providerId = providerId;
@@ -24,119 +27,161 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   async connect(config: ProviderConfig): Promise<boolean> {
-    this.apiKey = config.apiKey.trim();
-    if (!this.apiKey) return false;
-    this.ai = new GoogleGenAI({ apiKey: this.apiKey });
-    return true;
+    const validation = validateCredential(config.apiKey, 'Gemini');
+    if (!validation.valid) {
+      this.apiKey = '';
+      this.ai = null;
+      this.connectionError = validation.error || null;
+      console.warn(`[GeminiAdapter] Credential validation failed: ${validation.error?.message}`);
+      return false;
+    }
+
+    this.apiKey = validation.normalized;
+    this.connectionError = null;
+
+    try {
+      this.ai = new GoogleGenAI({ apiKey: this.apiKey });
+      return true;
+    } catch (err: any) {
+      this.connectionError = classifyProviderError(err, 'Gemini', 'REQUEST_CONSTRUCTION');
+      this.ai = null;
+      return false;
+    }
   }
 
-  async testConnection(): Promise<{ success: boolean; latencyMs: number; message: string }> {
-    if (!this.apiKey) {
-      return { success: false, latencyMs: 0, message: 'API key is missing' };
+  private getClient(): GoogleGenAI {
+    if (this.connectionError) {
+      throw this.connectionError;
     }
+    if (!this.ai || !this.apiKey) {
+      throw new ProviderError({
+        code: 'INVALID_API_KEY',
+        provider: 'Gemini',
+        stage: 'REQUEST_CONSTRUCTION',
+        retryable: false,
+        message: 'Gemini provider is not connected with a valid API key.'
+      });
+    }
+    return this.ai;
+  }
+
+  async testConnection(): Promise<{ success: boolean; latencyMs: number; message: string; error?: ProviderError }> {
     const start = Date.now();
+
+    if (this.connectionError) {
+      return {
+        success: false,
+        latencyMs: 0,
+        message: this.connectionError.message,
+        error: this.connectionError
+      };
+    }
+
+    let client: GoogleGenAI;
     try {
-      const ai = this.ai || new GoogleGenAI({ apiKey: this.apiKey });
-      // Minimal light probe with 10s timeout
-      const response = await Promise.race([
-        ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: 'ping',
-          config: { maxOutputTokens: 5 }
-        }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Connection timed out after 10s')), 10000))
-      ]);
-      const latencyMs = Date.now() - start;
-      if (response && response.text) {
-        return { success: true, latencyMs, message: `Connected to Google Gemini (${latencyMs}ms)` };
-      }
-      return { success: true, latencyMs, message: `Connected to Google Gemini (${latencyMs}ms)` };
+      client = this.getClient();
     } catch (err: any) {
-      // If gemini-2.5-flash failed, try a models.list call
-      try {
-        const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${this.apiKey}`);
-        const latencyMs = Date.now() - start;
-        if (listRes.ok) {
-          return { success: true, latencyMs, message: `Connected to Google Gemini (${latencyMs}ms)` };
-        }
-        const errJson = await listRes.json().catch(() => ({}));
-        const msg = errJson.error?.message || `HTTP ${listRes.status}`;
-        return { success: false, latencyMs, message: `Gemini Connection Failed: ${msg}` };
-      } catch (listErr: any) {
-        const latencyMs = Date.now() - start;
-        return { success: false, latencyMs, message: `Gemini Connection Error: ${err.message}` };
+      const pErr = classifyProviderError(err, 'Gemini', 'AUTHENTICATION');
+      return { success: false, latencyMs: 0, message: pErr.message, error: pErr };
+    }
+
+    try {
+      // Minimal test probe to verify credential and model availability
+      const response = await Promise.race([
+        client.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: 'Reply with exactly: PROVIDER_OK',
+          config: { 
+            thinkingConfig: { thinkingBudget: 0 },
+            maxOutputTokens: 100 
+          }
+        }),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Connection timed out after 10s')), 10000)
+        )
+      ]);
+
+      const latencyMs = Date.now() - start;
+      const text = response?.text?.trim() || 
+        response?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').filter(Boolean).join('') || '';
+
+      if (text.includes('PROVIDER_OK') || text.length > 0) {
+        return {
+          success: true,
+          latencyMs,
+          message: `Connected to Google Gemini (${latencyMs}ms)`
+        };
       }
+
+      return {
+        success: true,
+        latencyMs,
+        message: `Connected to Google Gemini (${latencyMs}ms)`
+      };
+    } catch (err: any) {
+      const latencyMs = Date.now() - start;
+      const pErr = classifyProviderError(err, 'Gemini', 'AUTHENTICATION');
+      return {
+        success: false,
+        latencyMs,
+        message: pErr.message,
+        error: pErr
+      };
     }
   }
 
   async listModels(): Promise<DiscoveredModel[]> {
-    if (!this.apiKey) return [];
+    let client: GoogleGenAI;
     try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${this.apiKey}`);
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error?.message || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const rawModels: any[] = data.models || [];
+      client = this.getClient();
+    } catch {
+      return [];
+    }
+
+    try {
+      const response = await client.models.list();
       const discovered: DiscoveredModel[] = [];
 
-      for (const m of rawModels) {
-        const id = m.name?.replace('models/', '') || '';
-        // Only include generateContent capable Gemini models
-        const methods: string[] = m.supportedGenerationMethods || [];
-        if (!methods.includes('generateContent') || !id.toLowerCase().includes('gemini')) {
+      for await (const m of response) {
+        const id = (m.name || '').replace('models/', '').trim();
+        if (!id || !id.toLowerCase().includes('gemini')) continue;
+
+        // Verify that model supports generateContent
+        const actions: string[] = (m as any).supportedActions || (m as any).supportedGenerationMethods || [];
+        const canGenerate = actions.length === 0 || actions.includes('generateContent');
+        if (!canGenerate) continue;
+
+        // Skip non-general models (live speech, robotics, tts, vision-only embeddings)
+        if (
+          id.includes('tts') ||
+          id.includes('transcribe') ||
+          id.includes('embedding') ||
+          id.includes('robotics') ||
+          id.includes('native-audio') ||
+          id.includes('live-translate')
+        ) {
           continue;
         }
+
+        const inputLimit = (m as any).inputTokenLimit || 1048576;
 
         discovered.push({
           modelIdentifier: id,
           displayName: m.displayName || id,
-          contextWindow: m.inputTokenLimit || 1048576,
+          contextWindow: inputLimit,
           supportsTools: true,
           supportsVision: true,
           supportsStreaming: true,
-          description: m.description || ''
+          description: m.description || `Discovered Google Gemini model: ${id}`
         });
       }
 
-      if (discovered.length > 0) {
-        return discovered;
-      }
-    } catch (e) {
-      console.warn('Gemini models listing failed, falling back to known models:', e);
+      return discovered;
+    } catch (err: any) {
+      const pErr = classifyProviderError(err, 'Gemini', 'DISCOVERY');
+      console.warn(`[GeminiAdapter] Model discovery error:`, pErr.message);
+      throw pErr;
     }
-
-    // Default known verified Gemini models
-    return [
-      {
-        modelIdentifier: 'gemini-2.5-flash',
-        displayName: 'Gemini 2.5 Flash',
-        contextWindow: 1048576,
-        supportsTools: true,
-        supportsVision: true,
-        supportsStreaming: true,
-        description: 'Ultra-fast multimodal model for general tasks and coding'
-      },
-      {
-        modelIdentifier: 'gemini-2.5-pro',
-        displayName: 'Gemini 2.5 Pro',
-        contextWindow: 1048576,
-        supportsTools: true,
-        supportsVision: true,
-        supportsStreaming: true,
-        description: 'Advanced reasoning, deep coding, and complex analysis'
-      },
-      {
-        modelIdentifier: 'gemini-2.0-flash',
-        displayName: 'Gemini 2.0 Flash',
-        contextWindow: 1048576,
-        supportsTools: true,
-        supportsVision: true,
-        supportsStreaming: true,
-        description: 'High-speed 2.0 generation model'
-      }
-    ];
   }
 
   async getModelMetadata(modelId: string): Promise<ModelMetadata | null> {
@@ -149,10 +194,9 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   async generate(request: GenerateRequest): Promise<GenerateResponse> {
-    const ai = this.ai || new GoogleGenAI({ apiKey: this.apiKey });
+    const client = this.getClient();
     const start = Date.now();
 
-    // Prepare contents
     const contents: any[] = [];
     for (const msg of request.messages) {
       contents.push({
@@ -174,31 +218,44 @@ export class GeminiAdapter implements ProviderAdapter {
     if (request.responseFormat === 'json') {
       config.responseMimeType = 'application/json';
     }
+    if (request.maxTokens && request.maxTokens < 300) {
+      config.thinkingConfig = { thinkingBudget: 0 };
+    }
 
-    const response = await ai.models.generateContent({
-      model: request.modelIdentifier || 'gemini-2.5-flash',
-      contents,
-      config
-    });
+    try {
+      const response = await client.models.generateContent({
+        model: request.modelIdentifier || 'gemini-2.5-flash',
+        contents,
+        config
+      });
 
-    const latencyMs = Date.now() - start;
-    const text = response.text || '';
-    const usage = (response as any).usageMetadata;
+      const latencyMs = Date.now() - start;
+      let text = response.text || '';
+      if (!text && response.candidates?.[0]?.content?.parts) {
+        text = response.candidates[0].content.parts
+          .map((p: any) => p.text || '')
+          .filter(Boolean)
+          .join('');
+      }
+      const usage = (response as any).usageMetadata;
 
-    return {
-      text,
-      inputTokens: usage?.promptTokenCount,
-      outputTokens: usage?.candidatesTokenCount,
-      totalTokens: usage?.totalTokenCount,
-      latencyMs,
-      finishReason: response.candidates?.[0]?.finishReason || 'STOP',
-      modelIdentifier: request.modelIdentifier,
-      providerId: this.providerId
-    };
+      return {
+        text,
+        inputTokens: usage?.promptTokenCount,
+        outputTokens: usage?.candidatesTokenCount,
+        totalTokens: usage?.totalTokenCount,
+        latencyMs,
+        finishReason: response.candidates?.[0]?.finishReason || 'STOP',
+        modelIdentifier: request.modelIdentifier,
+        providerId: this.providerId
+      };
+    } catch (err: any) {
+      throw classifyProviderError(err, 'Gemini', 'RUNTIME');
+    }
   }
 
   async streamGenerate(request: GenerateRequest, onChunk: (text: string) => void): Promise<GenerateResponse> {
-    const ai = this.ai || new GoogleGenAI({ apiKey: this.apiKey });
+    const client = this.getClient();
     const start = Date.now();
 
     const contents: any[] = [];
@@ -222,27 +279,35 @@ export class GeminiAdapter implements ProviderAdapter {
     if (request.responseFormat === 'json') {
       config.responseMimeType = 'application/json';
     }
-
-    const stream = await ai.models.generateContentStream({
-      model: request.modelIdentifier || 'gemini-2.5-flash',
-      contents,
-      config
-    });
-
-    let fullText = '';
-    for await (const chunk of stream) {
-      const piece = chunk.text || '';
-      fullText += piece;
-      onChunk(piece);
+    if (request.maxTokens && request.maxTokens < 300) {
+      config.thinkingConfig = { thinkingBudget: 0 };
     }
 
-    const latencyMs = Date.now() - start;
-    return {
-      text: fullText,
-      latencyMs,
-      modelIdentifier: request.modelIdentifier,
-      providerId: this.providerId
-    };
+    try {
+      const stream = await client.models.generateContentStream({
+        model: request.modelIdentifier || 'gemini-2.5-flash',
+        contents,
+        config
+      });
+
+      let fullText = '';
+      for await (const chunk of stream) {
+        const piece = chunk.text || 
+          chunk.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').filter(Boolean).join('') || '';
+        fullText += piece;
+        if (piece) onChunk(piece);
+      }
+
+      const latencyMs = Date.now() - start;
+      return {
+        text: fullText,
+        latencyMs,
+        modelIdentifier: request.modelIdentifier,
+        providerId: this.providerId
+      };
+    } catch (err: any) {
+      throw classifyProviderError(err, 'Gemini', 'RUNTIME');
+    }
   }
 
   async getQuota(): Promise<ProviderQuota | null> {

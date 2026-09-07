@@ -5,6 +5,7 @@ import util from 'util';
 import { ProviderManager } from './providerManager';
 import { ModelRouter, RouteDecision, ModelRecord } from './modelRouter';
 import { GenerateRequest, GenerateResponse, ModelRole } from './types';
+import { classifyProviderError } from './errors';
 
 const execAsync = util.promisify(exec);
 
@@ -140,10 +141,16 @@ export class AIRuntime {
         });
 
         return res;
-      } catch (err: any) {
-        lastError = err;
+      } catch (rawErr: any) {
+        const pErr = classifyProviderError(rawErr, candidate.providerId, 'RUNTIME');
+        lastError = pErr;
         fallbackUsed = true;
-        this.router.updateModelHealth(candidate.id, false, 0, err.message);
+
+        if (pErr.details.code === 'MODEL_NOT_FOUND') {
+          this.router.removeOrDisableModel(candidate.id, pErr.message);
+        } else {
+          this.router.updateModelHealth(candidate.id, false, 0, pErr.message);
+        }
 
         this.usageHistory.push({
           id: `inv-fail-${Date.now()}`,
@@ -155,10 +162,16 @@ export class AIRuntime {
           latencyMs: 0,
           success: false,
           fallbackUsed: true,
-          errorMessage: err.message
+          errorMessage: pErr.message
         });
 
-        console.warn(`Model ${candidate.modelIdentifier} failed: ${err.message}. Trying next candidate...`);
+        // If credentials are completely invalid or corrupted with illegal Unicode,
+        // trying another model on the exact same provider with the same key will fail identically
+        if (pErr.details.code === 'INVALID_HEADER_VALUE' || pErr.details.code === 'INVALID_API_KEY') {
+          throw pErr;
+        }
+
+        console.warn(`Model ${candidate.modelIdentifier} failed: ${pErr.message}. Trying next candidate...`);
       }
     }
 

@@ -8,6 +8,8 @@ import {
   GenerateResponse, 
   ProviderQuota 
 } from '../types';
+import { validateCredential } from '../credentialUtils';
+import { classifyProviderError } from '../errors';
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   providerId: string;
@@ -42,7 +44,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   async connect(config: ProviderConfig): Promise<boolean> {
-    this.apiKey = config.apiKey.trim();
+    const validation = validateCredential(config.apiKey, this.type);
+    if (!validation.valid) {
+      this.apiKey = '';
+      return false;
+    }
+    this.apiKey = validation.normalized;
     this.baseUrl = (config.baseUrl?.trim() || this.getDefaultBaseUrl(this.type)).replace(/\/+$/, '');
     this.customHeaders = config.customHeaders || {};
     return Boolean(this.apiKey);

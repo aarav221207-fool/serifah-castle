@@ -9,6 +9,8 @@ import {
 import { GeminiAdapter } from './adapters/gemini';
 import { OpenAICompatibleAdapter } from './adapters/openaiCompatible';
 import { AnthropicAdapter } from './adapters/anthropic';
+import { normalizeCredential, validateCredential } from './credentialUtils';
+import { classifyProviderError, ProviderError } from './errors';
 
 export interface SafeProviderInfo {
   id: string;
@@ -35,7 +37,7 @@ export class ProviderManager {
 
   constructor() {
     // 1. Auto-initialize environment Gemini key synchronously if present
-    const envGeminiKey = process.env.GEMINI_API_KEY;
+    const envGeminiKey = normalizeCredential(process.env.GEMINI_API_KEY);
     if (envGeminiKey) {
       const geminiConfig: ProviderConfig = {
         id: 'prov-gemini-env',
@@ -55,11 +57,11 @@ export class ProviderManager {
   }
 
   private async init() {
-    // 1. Try to load saved providers
     try {
       const data = await fs.readFile(STORAGE_FILE, 'utf-8');
       const parsed: ProviderConfig[] = JSON.parse(data);
       for (const config of parsed) {
+        // Only load if valid
         this.register(config, false);
       }
     } catch {
@@ -90,19 +92,35 @@ export class ProviderManager {
   }
 
   register(config: ProviderConfig, persist = true): SafeProviderInfo {
-    this.configs.set(config.id, config);
-    const adapter = this.createAdapter(config);
-    this.adapters.set(config.id, adapter);
+    let finalApiKey = normalizeCredential(config.apiKey);
 
-    if (!this.statuses.has(config.id)) {
-      this.statuses.set(config.id, { health: 'unknown' });
+    // CRITICAL PROTECTION: If the incoming key contains bullet points (masked key)
+    // or is empty, and we already have a real key for this provider ID, PRESERVE the real key!
+    if (this.configs.has(config.id)) {
+      const existing = this.configs.get(config.id)!;
+      if (finalApiKey.includes('•') || finalApiKey.includes('\u2022') || !finalApiKey) {
+        finalApiKey = existing.apiKey;
+      }
+    }
+
+    const cleanConfig: ProviderConfig = {
+      ...config,
+      apiKey: finalApiKey
+    };
+
+    this.configs.set(cleanConfig.id, cleanConfig);
+    const adapter = this.createAdapter(cleanConfig);
+    this.adapters.set(cleanConfig.id, adapter);
+
+    if (!this.statuses.has(cleanConfig.id)) {
+      this.statuses.set(cleanConfig.id, { health: 'unknown' });
     }
 
     if (persist) {
       this.saveToDisk().catch(err => console.error('Failed to persist provider config:', err));
     }
 
-    return this.getSafeInfo(config.id)!;
+    return this.getSafeInfo(cleanConfig.id)!;
   }
 
   deleteProvider(id: string): boolean {
@@ -152,6 +170,10 @@ export class ProviderManager {
     return this.adapters.get(id) || null;
   }
 
+  getConfig(id: string): ProviderConfig | null {
+    return this.configs.get(id) || null;
+  }
+
   getAllAdapters(): ProviderAdapter[] {
     return Array.from(this.adapters.values());
   }
@@ -180,16 +202,17 @@ export class ProviderManager {
         safeInfo: this.getSafeInfo(id)!
       };
     } catch (err: any) {
+      const pErr = classifyProviderError(err, adapter.type, 'AUTHENTICATION');
       this.statuses.set(id, {
         health: 'offline',
         lastTested: Date.now(),
-        lastError: err.message,
+        lastError: pErr.message,
         latencyMs: 0
       });
       return {
         success: false,
         latencyMs: 0,
-        message: err.message,
+        message: pErr.message,
         safeInfo: this.getSafeInfo(id)!
       };
     }
@@ -197,7 +220,13 @@ export class ProviderManager {
 
   async discoverModels(id: string): Promise<DiscoveredModel[]> {
     const adapter = this.adapters.get(id);
-    if (!adapter) throw new Error('Provider adapter not found');
+    if (!adapter) throw new ProviderError({
+      code: 'PROVIDER_UNAVAILABLE',
+      provider: id,
+      stage: 'DISCOVERY',
+      retryable: false,
+      message: 'Provider adapter not found'
+    });
     return adapter.listModels();
   }
 }

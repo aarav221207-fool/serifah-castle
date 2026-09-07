@@ -8,6 +8,8 @@ import {
   GenerateResponse, 
   ProviderQuota 
 } from '../types';
+import { validateCredential } from '../credentialUtils';
+import { classifyProviderError } from '../errors';
 
 export class AnthropicAdapter implements ProviderAdapter {
   providerId: string;
@@ -23,7 +25,12 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   async connect(config: ProviderConfig): Promise<boolean> {
-    this.apiKey = config.apiKey.trim();
+    const validation = validateCredential(config.apiKey, 'Anthropic');
+    if (!validation.valid) {
+      this.apiKey = '';
+      return false;
+    }
+    this.apiKey = validation.normalized;
     if (config.baseUrl) {
       this.baseUrl = config.baseUrl.trim().replace(/\/+$/, '');
     }

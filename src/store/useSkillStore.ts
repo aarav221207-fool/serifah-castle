@@ -4,8 +4,9 @@ import { Skill } from '../types/skills';
 interface SkillStore {
   skills: Skill[];
   isLearning: boolean;
+  fetchSkills: () => Promise<void>;
   learnSkill: (url: string) => Promise<void>;
-  removeSkill: (id: string) => void;
+  removeSkill: (id: string) => Promise<void>;
 }
 
 export const useSkillStore = create<SkillStore>((set, get) => ({
@@ -30,40 +31,75 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
       source: 'https://docs.github.com',
       status: 'VALIDATED',
       usageCount: 12
-    },
-    {
-      id: 'skill-framer',
-      name: 'Framer Motion',
-      description: 'Advanced declarative animations for React applications.',
-      conceptsLearned: ['spring physics', 'layout animations', 'gestures'],
-      version: '11.0.0',
-      source: 'https://github.com/framer/motion',
-      status: 'LEARNING',
-      usageCount: 0
     }
   ],
+  fetchSkills: async () => {
+    try {
+      const res = await fetch('/api/skills');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.skills) && data.skills.length > 0) {
+        set({
+          skills: data.skills.map((s: any) => ({
+            id: s.id,
+            name: s.name,
+            description: s.description || s.content,
+            conceptsLearned: ['production patterns', 'engineering rules'],
+            version: '1.0.0',
+            source: 'agent-skills',
+            status: 'VALIDATED',
+            usageCount: 1
+          }))
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to fetch skills:', e);
+    }
+  },
   learnSkill: async (url: string) => {
     set({ isLearning: true });
-    // Simulate learning process
-    await new Promise(r => setTimeout(r, 2000));
-    
-    const newSkill: Skill = {
-      id: `skill-${Date.now()}`,
-      name: 'Extracted Knowledge',
-      description: `Automatically extracted patterns from ${url}`,
-      conceptsLearned: ['analyzed components', 'api structure'],
-      version: '1.0.0',
-      source: url,
-      status: 'VALIDATED',
-      usageCount: 0
-    };
-    
-    set((state) => ({ 
-      skills: [newSkill, ...state.skills],
-      isLearning: false 
-    }));
+    try {
+      const skillName = url.replace(/^https?:\/\//, '').split('/')[0] || 'Learned Skill';
+      const res = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: skillName,
+          description: `Extracted patterns and guidelines from ${url}`,
+          content: `Guidelines extracted from ${url}. Ensure code conforms to these architectural standards.`
+        })
+      });
+      const data = await res.json();
+      if (data.skill) {
+        const s = data.skill;
+        set((state) => ({
+          skills: [{
+            id: s.id,
+            name: s.name,
+            description: s.description,
+            conceptsLearned: ['analyzed patterns', 'api structure'],
+            version: '1.0.0',
+            source: url,
+            status: 'VALIDATED',
+            usageCount: 0
+          }, ...state.skills.filter(existing => existing.id !== s.id)],
+          isLearning: false
+        }));
+        return;
+      }
+    } catch (e) {
+      console.warn('Learn skill network error:', e);
+    }
+    set({ isLearning: false });
   },
-  removeSkill: (id) => set((state) => ({
-    skills: state.skills.filter(s => s.id !== id)
-  }))
+  removeSkill: async (id: string) => {
+    try {
+      await fetch(`/api/skills/${id}`, { method: 'DELETE' });
+    } catch {
+      // ignore
+    }
+    set((state) => ({
+      skills: state.skills.filter(s => s.id !== id)
+    }));
+  }
 }));
